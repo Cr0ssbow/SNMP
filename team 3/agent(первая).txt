@@ -1,0 +1,71 @@
+import asyncio
+from pysnmp.entity import engine, config
+from pysnmp.entity.rfc3413 import cmdrsp, context
+from pysnmp.carrier.asyncio.dgram import udp
+from pysnmp.proto.api import v2c
+
+from pysnmp import debug
+debug.set_logger(debug.Debug('all'))
+
+AGENT_HOST = '127.0.0.1'
+AGENT_PORT = 1161  # >1024 — не требует прав администратора
+
+OID = (1, 3, 6, 1, 2, 1, 1, 1, 0)
+VALUE = 'Hello from SNMP Agent'
+
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+
+snmpEngine = engine.SnmpEngine()
+
+config.addTransport(
+    snmpEngine,
+    udp.domainName,
+    udp.UdpTransport().openServerMode((AGENT_HOST, AGENT_PORT))
+)
+
+config.addV1System(snmpEngine, 'my-area', 'public')
+
+config.addVacmUser(
+    snmpEngine, 2, 'my-area', 'noAuthNoPriv',
+    readSubTree=(1, 3, 6, 1, 2, 1)
+)
+
+snmpContext = context.SnmpContext(snmpEngine)
+mibBuilder = snmpContext.getMibInstrum().getMibBuilder()
+
+MibScalar, MibScalarInstance = mibBuilder.importSymbols(
+    'SNMPv2-SMI', 'MibScalar', 'MibScalarInstance'
+)
+
+class SysDescrValue(MibScalarInstance):
+    def getValue(self, name, **context):
+        return self.getSyntax().clone(VALUE)
+
+mibBuilder.exportSymbols(
+    '__MY_MIB',
+    MibScalar(OID[:-1], v2c.OctetString()),
+    SysDescrValue(OID[:-1], (OID[-1],), v2c.OctetString(VALUE))
+)
+
+cmdrsp.GetCommandResponder(snmpEngine, snmpContext)
+cmdrsp.NextCommandResponder(snmpEngine, snmpContext)
+cmdrsp.BulkCommandResponder(snmpEngine, snmpContext)
+
+print(f'SNMP Agent запущен на {AGENT_HOST}:{AGENT_PORT}')
+# snmpEngine.transport_dispatcher.job_started(1)
+
+# try:
+#     snmpEngine.transport_dispatcher.run_dispatcher()
+# except KeyboardInterrupt:
+#     print('Агент остановлен')
+#     snmpEngine.transport_dispatcher.close_dispatcher()
+async def run_agent():
+    await snmpEngine.transport_dispatcher.run()
+
+if __name__ == '__main__':
+    try:
+        asyncio.run(run_agent())
+    except KeyboardInterrupt:
+        print('Агент остановлен')
+        snmpEngine.transport_dispatcher.close_dispatcher()
