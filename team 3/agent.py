@@ -5,8 +5,8 @@
 #
 # Запуск: python agent.py
 # Проверка с другой машины:
-#   snmpget -v2c -c public <IP>:1161 1.3.6.1.2.1.1.1.0
-#   snmpwalk -v2c -c public <IP>:1161 .1.3.6.1.2.1.1
+#   snmpget -v2c -c public <IP>:1161 1.3.6.1.4.1.99999.1.0
+#   snmpwalk -v2c -c public <IP>:1161 1.3.6.1.4.1.99999
 #
 # Если агент недоступен с другой машины — откройте порт в firewall:
 #   Windows (PowerShell от администратора):
@@ -30,13 +30,16 @@ AGENT_HOST = '0.0.0.0'
 # Порт 1161 — пользовательский, не требует прав администратора
 AGENT_PORT = 1161
 
-# OID (Object Identifier) — адрес переменной в дереве MIB
-# 1.3.6.1.2.1.1.1.0 — стандартный OID sysDescr (описание системы)
-OID = (1, 3, 6, 1, 2, 1, 1, 1, 0)
-
-# Значение, которое агент будет возвращать по запросу snmpget
-# Можно заменить на любую строку или динамически вычисляемое значение
-VALUE = 'Hello from SNMP Agent'
+# Несколько OID с произвольными значениями для демонстрации snmpwalk
+# Формат: (OID_tuple, значение)
+# 1.3.6.1.4.1.99999 — пользовательское поддерево (enterprises), без стандартных объектов
+OID_VALUES = [
+    ((1, 3, 6, 1, 4, 1, 99999, 1, 0), 'Hello from SNMP Agent'),
+    ((1, 3, 6, 1, 4, 1, 99999, 2, 0), 'Moscow'),
+    ((1, 3, 6, 1, 4, 1, 99999, 3, 0), 'admin@example.com'),
+    ((1, 3, 6, 1, 4, 1, 99999, 4, 0), 'MyDevice-01'),
+    ((1, 3, 6, 1, 4, 1, 99999, 5, 0), 'Server Room 42'),
+]
 
 # Python 3.10+ не создаёт event loop автоматически — создаём вручную
 loop = asyncio.new_event_loop()
@@ -60,41 +63,42 @@ config.add_transport(
 config.add_v1_system(snmpEngine, 'my-area', 'public')
 
 # VACM (View-based Access Control Model) — контроль доступа
-# Параметры: движок, версия SNMP (2=v2c), securityName, уровень безопасности
 # readSubTree  — OID поддерева, доступного для чтения (snmpget/snmpwalk)
 # writeSubTree — OID поддерева, доступного для записи (snmpset)
 # notifySubTree — OID поддерева для уведомлений (trap)
-# (1,3,6,1,2,1) — стандартное поддерево mib-2, содержит sysDescr и др.
 config.add_vacm_user(
     snmpEngine, 2, 'my-area', 'noAuthNoPriv',
-    readSubTree=(1, 3, 6, 1, 2, 1),
-    writeSubTree=(1, 3, 6, 1, 2, 1),
-    notifySubTree=(1, 3, 6, 1, 2, 1)
+    readSubTree=(1, 3, 6, 1, 4, 1, 99999),
+    writeSubTree=(1, 3, 6, 1, 4, 1, 99999),
+    notifySubTree=(1, 3, 6, 1, 4, 1, 99999)
 )
 
 # Создаём SNMP контекст и получаем MIB builder для регистрации OID
 snmpContext = context.SnmpContext(snmpEngine)
-mibBuilder = snmpContext.getMibInstrum().getMibBuilder()
+mibBuilder = snmpContext.get_mib_instrum().get_mib_builder()
 
 # Импортируем базовые классы MIB для создания собственных переменных
-MibScalar, MibScalarInstance = mibBuilder.importSymbols(
+MibScalar, MibScalarInstance = mibBuilder.import_symbols(
     'SNMPv2-SMI', 'MibScalar', 'MibScalarInstance'
 )
 
-# Определяем класс переменной — переопределяем getValue для возврата нашего значения
-# Подсказка: можно возвращать динамические данные, например psutil.cpu_percent()
-class SysDescrValue(MibScalarInstance):
-    def getValue(self, name, **context):
-        return self.getSyntax().clone(VALUE)
+# Динамически создаём класс для каждого OID со своим значением
+def make_mib_instance(oid, value):
+    class DynamicValue(MibScalarInstance):
+        _value = value
+        def getValue(self, name, **context):
+            return self.get_syntax().clone(self._value)
+    return DynamicValue
 
-# Регистрируем OID в MIB дереве агента
-# OID[:-1] = (1,3,6,1,2,1,1,1) — родительский узел (скалярный объект)
-# OID[-1]  = 0                  — индекс экземпляра (0 для скалярных)
-mibBuilder.exportSymbols(
-    '__MY_MIB',
-    MibScalar(OID[:-1], v2c.OctetString()),
-    SysDescrValue(OID[:-1], (OID[-1],), v2c.OctetString(VALUE))
-)
+# Регистрируем все OID в MIB дереве агента
+# Каждый OID[:-1] — родительский узел, OID[-1] — индекс экземпляра (0)
+export_list = []
+for oid, value in OID_VALUES:
+    cls = make_mib_instance(oid, value)
+    export_list.append(MibScalar(oid[:-1], v2c.OctetString()))
+    export_list.append(cls(oid[:-1], (oid[-1],), v2c.OctetString(value)))
+
+mibBuilder.export_symbols('__MY_MIB', *export_list)
 
 # Регистрируем обработчики SNMP команд:
 # GetCommandResponder  — отвечает на snmpget  (запрос конкретного OID)
