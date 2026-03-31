@@ -1,8 +1,8 @@
 """
 SNMP агент на базе pysnmp 7.x.
 
-Регистрирует кастомный OID 1.3.6.1.4.1.99999.1.0 с доступом read-write.
-Поддерживает GET и SET запросы по SNMPv1 и SNMPv2c с community 'public'.
+Регистрирует кастомные OID в поддереве 1.3.6.1.4.1.99999 с доступом read-write.
+Поддерживает GET, SET и WALK запросы по SNMPv1 и SNMPv2c с community 'public'.
 Слушает UDP порт 1161.
 """
 
@@ -11,78 +11,74 @@ from pysnmp.entity.rfc3413 import cmdrsp, context
 from pysnmp.carrier.asyncio.dgram import udp
 from pysnmp.proto.rfc1902 import OctetString
 
-# Инициализация SNMP движка
 snmpEngine = engine.SnmpEngine()
 
-# Настройка транспорта: UDP, все интерфейсы, порт 1161
 config.add_transport(
     snmpEngine,
     udp.DOMAIN_NAME,
     udp.UdpTransport().open_server_mode(('0.0.0.0', 1161))
 )
 
-# Регистрация community 'public' с именем безопасности 'my-area'
 config.add_v1_system(snmpEngine, 'my-area', 'public')
 
-# Настройка VACM: разрешить чтение и запись поддерева 1.3.6.1.4.1.99999
-# для SNMPv1 (securityModel=1) и SNMPv2c (securityModel=2)
-config.add_vacm_user(snmpEngine, 1, 'my-area', 'noAuthNoPriv',
-                     readSubTree=(1, 3, 6, 1, 4, 1, 99999),
-                     writeSubTree=(1, 3, 6, 1, 4, 1, 99999))
-config.add_vacm_user(snmpEngine, 2, 'my-area', 'noAuthNoPriv',
-                     readSubTree=(1, 3, 6, 1, 4, 1, 99999),
-                     writeSubTree=(1, 3, 6, 1, 4, 1, 99999))
+for security_model in (1, 2):
+    config.add_vacm_user(
+        snmpEngine, security_model, 'my-area', 'noAuthNoPriv',
+        readSubTree=(1, 3, 6, 1, 4, 1, 99999),
+        writeSubTree=(1, 3, 6, 1, 4, 1, 99999)
+    )
 
-# Создание SNMP контекста и получение MIB builder'а
 snmpContext = context.SnmpContext(snmpEngine)
 mibBuilder = snmpContext.get_mib_instrum('').get_mib_builder()
 
-# Импорт базовых классов MIB из SNMPv2-SMI
 MibScalar, MibScalarInstance = mibBuilder.import_symbols(
     'SNMPv2-SMI', 'MibScalar', 'MibScalarInstance'
 )
 
-# OID кастомной переменной (без суффикса .0)
-CUSTOM_OID = (1, 3, 6, 1, 4, 1, 99999, 1)
+VARIABLES = [
+    ((1, 3, 6, 1, 4, 1, 99999, 1), "Hello from Device A!"),
+    ((1, 3, 6, 1, 4, 1, 99999, 2), "50"),    # CPU Load
+    ((1, 3, 6, 1, 4, 1, 99999, 3), "36.6"),  # Temperature
+]
 
-# Хранилище текущего значения переменной
-stored_value = [OctetString("Hello from Device A!")]
-
-
-class WritableMibScalarInstance(MibScalarInstance):
-    """Экземпляр MIB переменной с поддержкой чтения и записи."""
-
-    def getValue(self, name, **context):
-        """Возвращает текущее значение переменной."""
-        return stored_value[0].clone()
-
-    def setValue(self, value, name, **context):
-        """Сохраняет новое значение переменной при SET запросе."""
-        stored_value[0] = value
-        print(f"[SET] Получено: {value.prettyPrint()}")
-        return value
+stored_values = {oid: OctetString(val) for oid, val in VARIABLES}
 
 
-# Создание объекта MibScalar с доступом read-write
-customScalar = MibScalar(CUSTOM_OID, OctetString()).setMaxAccess('read-write')
+def make_instance_class(oid):
+    class _Instance(MibScalarInstance):
+        _oid = oid
 
-# Создание экземпляра переменной (суффикс (0,) соответствует .0 в OID)
-customInstance = WritableMibScalarInstance(CUSTOM_OID, (0,), OctetString("Hello from Device A!"))
+        def getValue(self, name, **ctx):
+            return stored_values[self._oid].clone()
 
-# Регистрация объектов в MIB дереве:
-# customInstance -> customScalar -> mibTree (iso)
-(mibTree,) = mibBuilder.import_symbols('SNMPv2-SMI', 'iso')
-customScalar.registerSubtrees(customInstance)
-mibTree.registerSubtrees(customScalar)
+        def setValue(self, value, name, **ctx):
+            stored_values[self._oid] = value
+            print(f"[SET] {'.'.join(map(str, self._oid))}.0 = {value.prettyPrint()}")
+            return value
 
-# Регистрация обработчиков GET и SET команд
+    return _Instance
+
+
+export_kwargs = {}
+for i, (oid, _) in enumerate(VARIABLES, start=1):
+    InstanceClass = make_instance_class(oid)
+    scalar   = MibScalar(oid, OctetString()).setMaxAccess('read-write')
+    instance = InstanceClass(oid, (0,), OctetString())
+    # Имена должны быть уникальными и сортироваться в порядке OID
+    export_kwargs[f'scalar_{i:03d}']      = scalar
+    export_kwargs[f'scalar_{i:03d}_inst'] = instance
+
+mibBuilder.export_symbols('__MY_MIB', **export_kwargs)
+
 cmdrsp.GetCommandResponder(snmpEngine, snmpContext)
 cmdrsp.SetCommandResponder(snmpEngine, snmpContext)
+cmdrsp.NextCommandResponder(snmpEngine, snmpContext)
+cmdrsp.BulkCommandResponder(snmpEngine, snmpContext)
 
 print("SNMP агент запущен на UDP:1161")
-print(f"OID: {'.'.join(map(str, CUSTOM_OID))}.0")
+for oid, val in VARIABLES:
+    print(f"  OID: {'.'.join(map(str, oid))}.0 = {val!r}")
 
-# Запуск диспетчера транспорта (блокирующий цикл)
 snmpEngine.transport_dispatcher.job_started(1)
 try:
     snmpEngine.transport_dispatcher.run_dispatcher()

@@ -32,13 +32,25 @@ AGENT_PORT = 1161
 
 # Несколько OID с произвольными значениями для демонстрации snmpwalk
 # Формат: (OID_tuple, значение)
+# OID 1.3.6.1.2.1.1.X.0 — поддерево system в mib-2 (содержит стандартные объекты Timeticks)
+# OID_VALUES = [
+#     ((1, 3, 6, 1, 2, 1, 1, 1, 0), 'Hello from SNMP Agent'),   # sysDescr
+#     ((1, 3, 6, 1, 2, 1, 1, 2, 0), 'Moscow'),                   # sysObjectID
+#     ((1, 3, 6, 1, 2, 1, 1, 4, 0), 'admin@example.com'),        # sysContact
+#     ((1, 3, 6, 1, 2, 1, 1, 5, 0), 'MyDevice-01'),              # sysName
+#     ((1, 3, 6, 1, 2, 1, 1, 6, 0), 'Server Room 42'),           # sysLocation
+# ]
+
 # 1.3.6.1.4.1.99999 — пользовательское поддерево (enterprises), без стандартных объектов
+# Формат: (OID_tuple, значение)
+# OID[:-1] = (1,3,6,1,4,1,99999,1) — общий родительский узел
+# OID[-1]  = 1,2,3,4,5 — индекс экземпляра
 OID_VALUES = [
-    ((1, 3, 6, 1, 4, 1, 99999, 1, 0), 'Hello from SNMP Agent'),
-    ((1, 3, 6, 1, 4, 1, 99999, 2, 0), 'Moscow'),
-    ((1, 3, 6, 1, 4, 1, 99999, 3, 0), 'admin@example.com'),
-    ((1, 3, 6, 1, 4, 1, 99999, 4, 0), 'MyDevice-01'),
-    ((1, 3, 6, 1, 4, 1, 99999, 5, 0), 'Server Room 42'),
+    ((1, 3, 6, 1, 4, 1, 99999, 1, 1), 'Hello from SNMP Agent'),
+    ((1, 3, 6, 1, 4, 1, 99999, 1, 2), 'Moscow'),
+    ((1, 3, 6, 1, 4, 1, 99999, 1, 3), 'admin@example.com'),
+    ((1, 3, 6, 1, 4, 1, 99999, 1, 4), 'MyDevice-01'),
+    ((1, 3, 6, 1, 4, 1, 99999, 1, 5), 'Server Room 42'),
 ]
 
 # Python 3.10+ не создаёт event loop автоматически — создаём вручную
@@ -73,6 +85,7 @@ config.add_vacm_user(
     notifySubTree=(1, 3, 6, 1, 4, 1, 99999)
 )
 
+
 # Создаём SNMP контекст и получаем MIB builder для регистрации OID
 snmpContext = context.SnmpContext(snmpEngine)
 mibBuilder = snmpContext.get_mib_instrum().get_mib_builder()
@@ -87,16 +100,18 @@ def make_mib_instance(oid, value):
     class DynamicValue(MibScalarInstance):
         _value = value
         def getValue(self, name, **context):
-            return self.get_syntax().clone(self._value)
+            return self.syntax.clone(self._value)
     return DynamicValue
 
 # Регистрируем все OID в MIB дереве агента
-# Каждый OID[:-1] — родительский узел, OID[-1] — индекс экземпляра (0)
-export_list = []
+# MibScalar — родительский узел, регистрируется один раз для всего поддерева
+# MibScalarInstance — каждый экземпляр со своим индексом и значением
+PARENT_OID = (1, 3, 6, 1, 4, 1, 99999, 1)
+
+export_list = [MibScalar(PARENT_OID, v2c.OctetString())]
 for oid, value in OID_VALUES:
     cls = make_mib_instance(oid, value)
-    export_list.append(MibScalar(oid[:-1], v2c.OctetString()))
-    export_list.append(cls(oid[:-1], (oid[-1],), v2c.OctetString(value)))
+    export_list.append(cls(PARENT_OID, (oid[-1],), v2c.OctetString(value)))
 
 mibBuilder.export_symbols('__MY_MIB', *export_list)
 

@@ -21,8 +21,9 @@ from pysnmp.hlapi.asyncio import (
 )
 
 # --- Настройки подключения к агенту ---
-# Подсказка: замените на IP адрес машины с запущенным agent.py
-AGENT_HOST = '127.0.0.1'
+# IP адрес Windows машины где запущен agent.py
+# Подсказка: узнать IP на Windows — команда ipconfig
+AGENT_HOST = '192.168.100.7'
 AGENT_PORT = 1161
 
 # Community string — должен совпадать с тем, что задан в agent.py
